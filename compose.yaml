@@ -1,0 +1,15 @@
+services:
+  bingo:
+    build: .
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      LISTEN_ADDR: ":8080"
+      BING_BASE_URL: "${BING_BASE_URL:-https://www.bing.com}"
+      HTTP_TIMEOUT: "${HTTP_TIMEOUT:-10s}"
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
