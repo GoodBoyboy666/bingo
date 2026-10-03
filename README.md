@@ -149,7 +149,7 @@ go build -o bin/bingo .
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `LISTEN_ADDR` | `:8080` | HTTP 监听地址，例如 `127.0.0.1:8090` |
-| `BING_BASE_URL` | `https://www.bing.com` | Bing 服务地址，须为 HTTP(S) 地址，不包含路径、查询参数或账号密码 |
+| `BING_BASE_URL` | `https://www.bing.com` | Bing 服务地址，须为可信的 HTTP(S) 地址，不包含路径、查询参数或账号密码 |
 | `HTTP_TIMEOUT` | `10s` | 获取图片信息和图片内容的总超时时间，例如 `15s` |
 
 本地运行时设置超时时间：
@@ -168,6 +168,8 @@ docker run -d --name bingo --restart unless-stopped \
 ```
 
 Docker Compose 支持通过 `.env` 设置 `PORT`、`BING_BASE_URL` 和 `HTTP_TIMEOUT`，容器内的监听端口固定为 `8080`。
+
+图片地址和上游请求限定为 `BING_BASE_URL` 配置的协议、域名及端口。上游重定向到其他地址时，接口返回 `502`。
 
 ## 镜像发布
 

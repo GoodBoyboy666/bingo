@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
-	"strings"
 )
 
 const (
@@ -21,7 +20,10 @@ const (
 	maxImageBytes   = 32 << 20
 )
 
-var sizePattern = regexp.MustCompile(`^[1-9][0-9]{0,4}x[1-9][0-9]{0,4}$`)
+var (
+	sizePattern    = regexp.MustCompile(`^[1-9][0-9]{0,4}x[1-9][0-9]{0,4}$`)
+	imageIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+)
 
 type bingImage struct {
 	URLBase       string `json:"urlbase"`
@@ -43,7 +45,19 @@ type imageHandler struct {
 }
 
 func newHandler(cfg config) http.Handler {
-	h := &imageHandler{cfg: cfg, client: &http.Client{Timeout: cfg.httpTimeout}}
+	h := &imageHandler{cfg: cfg}
+	h.client = &http.Client{
+		Timeout: cfg.httpTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("too many Bing redirects")
+			}
+			if !h.isValidRedirect(req.URL.String()) {
+				return fmt.Errorf("Bing redirected to a disallowed URL")
+			}
+			return nil
+		},
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/{$}", h.serveImage)
 	return mux
@@ -100,7 +114,12 @@ func (h *imageHandler) serveImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !wantProxy {
-		http.Redirect(w, r, info.URL, http.StatusFound)
+		redirectURL := info.URL
+		if !h.isValidRedirect(redirectURL) {
+			upstreamError(w, fmt.Errorf("Bing returned a disallowed redirect URL"))
+			return
+		}
+		http.Redirect(w, r, redirectURL, http.StatusFound)
 		return
 	}
 	if err := h.proxyImage(ctx, w, r.Method, info.URL); err != nil {
@@ -131,15 +150,25 @@ func (h *imageHandler) fetchInfo(ctx context.Context, day int, size string) (ima
 	}
 	img := archive.Images[0]
 	base, err := url.Parse(img.URLBase)
-	if err != nil || base.IsAbs() || base.Host != "" || !strings.HasPrefix(base.Path, "/") ||
-		strings.HasPrefix(base.Path, "//") || base.Fragment != "" {
+	if err != nil || base.IsAbs() || base.Host != "" || base.User != nil || base.Opaque != "" ||
+		base.Path != "/th" || base.RawPath != "" || base.Fragment != "" {
 		return imageInfo{}, fmt.Errorf("Bing archive contains an invalid image URL")
 	}
-	imageURL := h.cfg.bingBaseURL.ResolveReference(base).String() + "_" + size + ".jpg"
-	if size == "UHD" {
-		imageURL += "&w=3840&h=2160&c=8&rs=1&o=3&r=0"
+	params, err := url.ParseQuery(base.RawQuery)
+	if err != nil || len(params) != 1 || len(params["id"]) != 1 || !imageIDPattern.MatchString(params.Get("id")) {
+		return imageInfo{}, fmt.Errorf("Bing archive contains an invalid image ID")
 	}
-	return imageInfo{Title: img.Copyright, URL: imageURL, Link: img.CopyrightLink, Time: img.StartDate}, nil
+	// Only the image ID comes from Bing; the origin and endpoint are server-controlled.
+	imageURL := &url.URL{
+		Scheme:   h.cfg.bingBaseURL.Scheme,
+		Host:     h.cfg.bingBaseURL.Host,
+		Path:     "/th",
+		RawQuery: url.Values{"id": {params.Get("id") + "_" + size + ".jpg"}}.Encode(),
+	}
+	if size == "UHD" {
+		imageURL.RawQuery += "&w=3840&h=2160&c=8&rs=1&o=3&r=0"
+	}
+	return imageInfo{Title: img.Copyright, URL: imageURL.String(), Link: img.CopyrightLink, Time: img.StartDate}, nil
 }
 
 func (h *imageHandler) proxyImage(ctx context.Context, w http.ResponseWriter, method, imageURL string) error {
@@ -181,6 +210,9 @@ func (h *imageHandler) proxyImage(ctx context.Context, w http.ResponseWriter, me
 }
 
 func (h *imageHandler) fetch(ctx context.Context, method, target string) (*http.Response, error) {
+	if !h.isValidRedirect(target) {
+		return nil, fmt.Errorf("disallowed Bing request URL")
+	}
 	req, err := http.NewRequestWithContext(ctx, method, target, nil)
 	if err != nil {
 		return nil, err
@@ -194,6 +226,17 @@ func (h *imageHandler) fetch(ctx context.Context, method, target string) (*http.
 		return nil, fmt.Errorf("Bing returned HTTP %d", response.StatusCode)
 	}
 	return response, nil
+}
+
+// isValidRedirect restricts both redirects and outbound requests to the configured
+// origin and the two Bing endpoints used by this service.
+func (h *imageHandler) isValidRedirect(target string) bool {
+	parsed, err := url.Parse(target)
+	if err != nil || parsed.User != nil || parsed.Opaque != "" || parsed.Fragment != "" || parsed.RawPath != "" {
+		return false
+	}
+	return parsed.Scheme == h.cfg.bingBaseURL.Scheme && parsed.Host == h.cfg.bingBaseURL.Host &&
+		(parsed.Path == "/th" || parsed.Path == "/HPImageArchive.aspx")
 }
 
 func readLimited(reader io.Reader, limit int64) ([]byte, error) {
